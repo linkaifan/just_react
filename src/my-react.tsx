@@ -1,33 +1,41 @@
 /** @jsxRuntime classic */
-const isEvent = (key: string) => key.startsWith('on')
-const isProperty = (key: string) => key !== 'children' && !isEvent(key)
-const isNew = (prev: any, next: any) => (key: string) => prev[key] !== next[key]
-const isGone = (prev: any, next: any) => (key: string) => !(key in next)
-
 const TEXT_ELEMENT = 'TEXT_ELEMENT'
 
-interface Element {
-  type: string
-  props: any
-}
-
-interface Fiber {
-  type: string
-  props: any
-  dom: any
-}
-
 type Dom = Text | HTMLElement
+interface Props {
+  [key: string]: unknown
+}
+interface Element {
+  type: string | Function
+  props: Props
+}
+interface Fiber {
+  type: string | Function
+  alternate: Fiber | null
+  props: Props
+  dom: Dom | null
+  parent: Fiber | null
+  child: Fiber | null
+  sibling: Fiber | null
+  effectTag?: 'PLACEMENT' | 'UPDATE' | 'DELETION'
+  hooks?: any[]
+}
 
-let nextUnitOfWork: any = null
-let currentRoot: any = null
-let wipRoot: any = null
-let deletions: any = null
+let currentRoot: Fiber | null = null
+let wipRoot: Fiber | null = null
+let nextUnitOfWork: Fiber | null = null
+const deletions = new Set<Fiber>()
 
-let wipFiber: any = null
-let hookIndex: any = null
+const isEvent = (key: string) => key.startsWith('on')
+const isProperty = (key: string) => key !== 'children' && !isEvent(key)
+const isNew = (prev: Props, next: Props) => (key: string) => prev[key] !== next[key]
+const isGone = (_: Props, next: Props) => (key: string) => !(key in next)
 
-const createElement = (type: string, props: any, ...children: []): Element => {
+// hooks
+let hookFiber: Fiber | null = null
+let hookIndex = 0
+
+const createElement = (type: string, props: Props, ...children: []): Element => {
   return {
     type,
     props: {
@@ -50,22 +58,25 @@ const createTextElement = (text: string): Element => {
 }
 
 const createDom = (fiber: Fiber): Dom => {
-  const dom =
-    fiber.type === 'TEXT_ELEMENT' ? document.createTextNode('') : document.createElement(fiber.type)
+  const { type, props } = fiber!
+  const isText = type === TEXT_ELEMENT
 
-  updateDom(dom, {}, fiber.props)
+  const dom = isText
+    ? document.createTextNode(props.nodeValue as string)
+    : document.createElement(type as string)
+  updateDom(dom, {}, props)
 
   return dom
 }
 
-const updateDom = (dom: any, prevProps: any, nextProps: any) => {
+const updateDom = (dom: any, prevProps: Props, nextProps: Props) => {
   //Remove old or changed event listeners
   Object.keys(prevProps)
     .filter(isEvent)
     .filter((key) => !(key in nextProps) || isNew(prevProps, nextProps)(key))
     .forEach((name) => {
       const eventType = name.toLowerCase().substring(2)
-      dom.removeEventListener(eventType, prevProps[name])
+      dom.removeEventListener(eventType, prevProps[name] as any)
     })
 
   // Remove old properties
@@ -90,57 +101,62 @@ const updateDom = (dom: any, prevProps: any, nextProps: any) => {
     .filter(isNew(prevProps, nextProps))
     .forEach((name) => {
       const eventType = name.toLowerCase().substring(2)
-      dom.addEventListener(eventType, nextProps[name])
+      dom.addEventListener(eventType, nextProps[name] as any)
     })
 }
 
 const commitRoot = () => {
-  deletions?.forEach(commitWork)
-  commitWork(wipRoot.child)
+  deletions.forEach(commitWork)
+  commitWork(wipRoot!.child)
   currentRoot = wipRoot
   wipRoot = null
 }
 
-function commitWork(fiber: any) {
+function commitWork(fiber: Fiber | null) {
   if (!fiber) {
     return
   }
 
   let domParentFiber = fiber.parent
-  while (!domParentFiber.dom) {
-    domParentFiber = domParentFiber.parent
+  while (!domParentFiber!.dom) {
+    domParentFiber = domParentFiber!.parent
   }
-  const domParent = domParentFiber.dom
+  const domParent = domParentFiber!.dom
 
   if (fiber.effectTag === 'PLACEMENT' && fiber.dom != null) {
     domParent.appendChild(fiber.dom)
   } else if (fiber.effectTag === 'UPDATE' && fiber.dom != null) {
-    updateDom(fiber.dom, fiber.alternate.props, fiber.props)
+    updateDom(fiber.dom, fiber.alternate!.props, fiber.props)
   } else if (fiber.effectTag === 'DELETION') {
-    commitDeletion(fiber, domParent)
+    commitDeletion(fiber, domParent as HTMLElement)
   }
 
   commitWork(fiber.child)
   commitWork(fiber.sibling)
 }
 
-const commitDeletion = (fiber: any, domParent: any) => {
+const commitDeletion = (fiber: Fiber, domParent: HTMLElement) => {
   if (fiber.dom) {
     domParent.removeChild(fiber.dom)
   } else {
-    commitDeletion(fiber.child, domParent)
+    // 函数式组件无dom
+    commitDeletion(fiber.child!, domParent)
   }
 }
 
-const render = (element: Element, container: any) => {
+const render = (element: Element, container: HTMLElement) => {
   wipRoot = {
     dom: container,
     props: {
       children: [element]
     },
-    alternate: currentRoot
+    alternate: currentRoot,
+    type: 'wipRoot',
+    child: null,
+    sibling: null,
+    parent: null
   }
-  deletions = []
+  deletions.clear()
   nextUnitOfWork = wipRoot
 }
 
@@ -158,41 +174,47 @@ const workLoop = (deadline: IdleDeadline) => {
   requestIdleCallback(workLoop)
 }
 
-const performUnitOfWork = (fiber: any) => {
+const performUnitOfWork = (fiber: Fiber): Fiber | null => {
   const isFunctionComponent = fiber.type instanceof Function
   if (isFunctionComponent) {
     updateFunctionComponent(fiber)
   } else {
     updateHostComponent(fiber)
   }
+
   if (fiber.child) {
     return fiber.child
   }
-  let nextFiber = fiber
+  let nextFiber: Fiber | null = fiber
   while (nextFiber) {
     if (nextFiber.sibling) {
       return nextFiber.sibling
     }
     nextFiber = nextFiber.parent
   }
+  return null
 }
 
-const updateFunctionComponent = (fiber: any) => {
-  wipFiber = fiber
+const updateFunctionComponent = (fiber: Fiber) => {
+  hookFiber = fiber
   hookIndex = 0
-  wipFiber.hooks = []
-  const children = [fiber.type(fiber.props)]
+  hookFiber.hooks = []
+  const children = [(fiber.type as Function)(fiber.props)]
   reconcileChildren(fiber, children)
 }
 
 function useState<T>(initial: T) {
+  if (!hookFiber) {
+    return []
+  }
   const oldHook =
-    wipFiber.alternate && wipFiber.alternate.hooks && wipFiber.alternate.hooks[hookIndex]
+    hookFiber.alternate && hookFiber.alternate.hooks && hookFiber.alternate.hooks[hookIndex!]
   const hook = {
     state: oldHook ? oldHook.state : initial,
-    queue: [] as any
+    queue: [] as any[]
   }
 
+  // queue为数组，存在一次调用多个setState的case
   const actions = oldHook ? oldHook.queue : []
   actions.forEach((action: any) => {
     hook.state = action(hook.state)
@@ -201,47 +223,53 @@ function useState<T>(initial: T) {
   const setState = (action: any) => {
     hook.queue.push(action)
     wipRoot = {
-      dom: currentRoot.dom,
-      props: currentRoot.props,
-      alternate: currentRoot
+      dom: currentRoot!.dom,
+      props: currentRoot!.props,
+      alternate: currentRoot,
+      type: 'wipRoot',
+      child: null,
+      sibling: null,
+      parent: null
     }
     nextUnitOfWork = wipRoot
-    deletions = [] as any
+    deletions.clear()
   }
 
-  wipFiber.hooks.push(hook)
-  hookIndex++
+  hookFiber!.hooks!.push(hook)
+  hookIndex!++
   return [hook.state, setState]
 }
 
-const updateHostComponent = (fiber: any) => {
+const updateHostComponent = (fiber: Fiber) => {
   if (!fiber.dom) {
     fiber.dom = createDom(fiber)
   }
-  reconcileChildren(fiber, fiber.props.children)
+  reconcileChildren(fiber, fiber.props.children as Element[])
 }
 
-const reconcileChildren = (wipFiber: any, elements: any[]) => {
+const reconcileChildren = (fiber: Fiber, elements: Element[]) => {
   let index = 0
-  let oldFiber = wipFiber.alternate && wipFiber.alternate.child
+  let oldFiber = fiber.alternate && fiber.alternate.child
   let prevSibling: any = null
   if (!elements) {
     return
   }
-  while (index < elements.length || oldFiber != null) {
+  while (index < elements.length || oldFiber !== null) {
     const element = elements[index]
-    let newFiber = null
+    let newFiber: Fiber | null = null
 
-    const sameType = oldFiber && element && element.type === oldFiber.type
+    const sameType = oldFiber !== null && element !== null && element.type === oldFiber.type
 
     if (sameType) {
       newFiber = {
-        type: oldFiber.type,
+        type: oldFiber!.type,
         props: element.props,
-        dom: oldFiber.dom,
-        parent: wipFiber,
+        dom: oldFiber!.dom,
+        parent: fiber,
         alternate: oldFiber,
-        effectTag: 'UPDATE'
+        effectTag: 'UPDATE',
+        child: null,
+        sibling: null
       }
     }
     if (element && !sameType) {
@@ -249,14 +277,16 @@ const reconcileChildren = (wipFiber: any, elements: any[]) => {
         type: element.type,
         props: element.props,
         dom: null,
-        parent: wipFiber,
+        parent: fiber,
         alternate: null,
-        effectTag: 'PLACEMENT'
+        effectTag: 'PLACEMENT',
+        child: null,
+        sibling: null
       }
     }
     if (oldFiber && !sameType) {
       oldFiber.effectTag = 'DELETION'
-      deletions?.push(oldFiber)
+      deletions.add(oldFiber)
     }
 
     if (oldFiber) {
@@ -264,7 +294,7 @@ const reconcileChildren = (wipFiber: any, elements: any[]) => {
     }
 
     if (index === 0) {
-      wipFiber.child = newFiber
+      fiber.child = newFiber
     } else if (element) {
       prevSibling!.sibling = newFiber
     }
@@ -283,14 +313,19 @@ const Didact = {
 /** @jsx Didact.createElement */
 const Counter = () => {
   const [state, setState] = Didact.useState(1)
-  return <h1 onClick={() => setState((c: number) => c + 1)}>Count: {state}</h1>
+
+  const onClick = () => {
+    setState((c: number) => c + 1)
+    setState((c: number) => c + 1)
+  }
+  return <h1 onClick={onClick}>Count: {state}</h1>
 }
 
-const container = document.getElementById('app')
+const element = <Counter />
 
 const didactRender = () => {
-  /** @jsx Didact.createElement */
-  Didact.render(<Counter />, container)
+  const container = document.getElementById('app')
+  Didact.render(element, container!)
   requestIdleCallback(workLoop)
 }
 
