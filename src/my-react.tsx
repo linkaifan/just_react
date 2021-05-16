@@ -286,7 +286,7 @@ const Counter = () => {
   return <h1 onClick={() => setState((c: number) => c + 1)}>Count: {state}</h1>
 }
 
-const container = document.getElementById('root')
+const container = document.getElementById('app')
 
 const didactRender = () => {
   /** @jsx Didact.createElement */
